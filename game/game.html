@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinity Platformer - Fixed Level System</title>
+    <style>
+        body {
+            margin: 0; padding: 0;
+            background-color: #1a1a2e;
+            display: flex; justify-content: center; align-items: center;
+            height: 100vh; font-family: 'Malgun Gothic', sans-serif;
+            overflow: hidden;
+        }
+        #game-container { position: relative; box-shadow: 0 0 50px rgba(0,0,0,0.8); }
+        canvas { display: block; background: linear-gradient(to bottom, #1e3c72, #2a5298); border: 4px solid #fff; border-radius: 8px; }
+        #ui-layer {
+            position: absolute; top: 15px; left: 20px; color: #fff;
+            font-size: 22px; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            pointer-events: none; line-height: 1.5;
+        }
+        .highlight { color: #f1c40f; }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <div id="ui-layer">
+            Round: <span id="levelDisplay" class="highlight">1</span><br>
+            Score: <span id="scoreDisplay">0</span>
+        </div>
+        <canvas id="gameCanvas" width="800" height="450"></canvas>
+    </div>
+
+    <script>
+        /** * [상수 및 설정] */
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreDisplay = document.getElementById('scoreDisplay');
+        const levelDisplay = document.getElementById('levelDisplay');
+
+        const GRAVITY = 0.6;
+        const FRICTION = 0.8;
+        const TERMINAL_VELOCITY = 12;
+
+        let currentLevel = 1;
+        let totalScore = 0;
+        let gameState = 'PLAYING'; 
+        let isTransitioning = false; 
+        let cameraX = 0;
+
+        const keys = { ArrowLeft: false, ArrowRight: false, Space: false };
+
+        window.addEventListener('keydown', (e) => { if (keys.hasOwnProperty(e.code)) keys[e.code] = true; });
+        window.addEventListener('keyup', (e) => { if (keys.hasOwnProperty(e.code)) keys[e.code] = false; });
+
+        /** * [유틸리티] */
+        function checkAABB(rect1, rect2) {
+            return (
+                rect1.x < rect2.x + rect2.width &&
+                rect1.x + rect1.width > rect2.x &&
+                rect1.y < rect2.y + rect2.height &&
+                rect1.y + rect1.height > rect2.y
+            );
+        }
+
+        /** * [엔티티 클래스] */
+        class Platform {
+            constructor(x, y, width, height, color = '#2ecc71', isGoal = false) {
+                this.x = x; this.y = y; this.width = width; this.height = height;
+                this.color = color;
+                this.isGoal = isGoal; 
+            }
+            draw(ctx) {
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+                if(this.isGoal) { 
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(this.x, this.y, this.width, this.height);
+                }
+            }
+        }
+
+        class Coin {
+            constructor(x, y) {
+                this.x = x; this.y = y; this.width = 20; this.height = 20;
+                this.cx = x + 10; this.cy = y + 10;
+            }
+            draw(ctx) {
+                ctx.fillStyle = '#f1c40f';
+                ctx.beginPath(); ctx.arc(this.cx, this.cy, 8, 0, Math.PI * 2); ctx.fill();
+            }
+        }
+
+        class Enemy {
+            constructor(x, y, patrolDistance, speed) {
+                this.startX = x; this.x = x; this.y = y;
+                this.width = 30; this.height = 30;
+                this.patrolDistance = patrolDistance;
+                this.speed = speed;
+                this.direction = 1;
+            }
+            update() {
+                this.x += this.speed * this.direction;
+                if (this.x > this.startX + this.patrolDistance || this.x < this.startX) {
+                    this.direction *= -1;
+                }
+            }
+            draw(ctx) {
+                ctx.fillStyle = '#e74c3c';
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+                ctx.fillStyle = 'white';
+                ctx.fillRect(this.x + 5, this.y + 5, 6, 6);
+                ctx.fillRect(this.x + 19, this.y + 5, 6, 6);
+            }
+        }
+
+        class Player {
+            constructor(x, y) {
+                this.x = x; this.y = y; this.width = 30; this.height = 30;
+                this.vx = 0; this.vy = 0;
+                this.isGrounded = false;
+                this.touchingGoal = false; // 보라색 판에 닿았는지 기록하는 플래그
+            }
+            update(platforms) {
+                this.touchingGoal = false; // 매 프레임 초기화
+
+                if (keys.ArrowLeft) this.vx -= 1;
+                if (keys.ArrowRight) this.vx += 1;
+                this.vx *= FRICTION;
+
+                // X축 이동
+                this.x += this.vx;
+                platforms.forEach(p => {
+                    if (checkAABB(this, p)) {
+                        // 충돌 시 밀려나기 "전"에 목표 지점인지 확인
+                        if (p.isGoal) this.touchingGoal = true; 
+
+                        if (this.vx > 0) this.x = p.x - this.width;
+                        else if (this.vx < 0) this.x = p.x + p.width;
+                        this.vx = 0;
+                    }
+                });
+
+                // Y축 이동
+                this.vy += GRAVITY;
+                if (this.vy > TERMINAL_VELOCITY) this.vy = TERMINAL_VELOCITY;
+                if (keys.Space && this.isGrounded) { this.vy = -13; this.isGrounded = false; }
+
+                this.y += this.vy;
+                this.isGrounded = false;
+                platforms.forEach(p => {
+                    if (checkAABB(this, p)) {
+                        // 충돌 시 밀려나기 "전"에 목표 지점인지 확인
+                        if (p.isGoal) this.touchingGoal = true;
+
+                        if (this.vy > 0) { this.y = p.y - this.height; this.vy = 0; this.isGrounded = true; }
+                        else if (this.vy < 0) { this.y = p.y + p.height; this.vy = 0; }
+                    }
+                });
+
+                if (this.y > canvas.height + 100) gameState = 'GAMEOVER';
+            }
+            draw(ctx) {
+                ctx.fillStyle = '#3498db';
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+            }
+        }
+
+        /** * [게임 로직] */
+        let player, platforms, enemies, coins;
+
+        function initLevel(level) {
+            gameState = 'PLAYING';
+            isTransitioning = false; 
+            cameraX = 0;
+            levelDisplay.innerText = level;
+            
+            player = new Player(100, 300);
+            
+            platforms = [
+                new Platform(0, 400, 800, 50),
+                new Platform(900, 350, 600, 50),
+                new Platform(1600, 400, 800, 50),
+                new Platform(2500, 300, 200, 20, '#9b59b6', true), // 보라색 도착 지점
+                new Platform(400, 280, 150, 20),
+                new Platform(700, 200, 150, 20),
+                new Platform(1100, 250, 150, 20),
+                new Platform(1800, 280, 200, 20),
+                new Platform(2100, 200, 150, 20)
+            ];
+
+            enemies = [];
+            const enemyCount = 2 + Math.floor(level * 1.5);
+            const enemySpeed = 2 + (level * 0.3);
+
+            for (let i = 0; i < enemyCount; i++) {
+                const targetPlat = platforms[Math.floor(Math.random() * (platforms.length - 2)) + 1];
+                const patrolDist = targetPlat.width - 30;
+                enemies.push(new Enemy(targetPlat.x, targetPlat.y - 30, patrolDist, enemySpeed));
+            }
+
+            coins = [];
+            platforms.forEach((p, index) => {
+                if (index > 0 && !p.isGoal) {
+                    coins.push(new Coin(p.x + p.width/2 - 10, p.y - 40));
+                }
+            });
+        }
+
+        function update() {
+            if (gameState !== 'PLAYING') return;
+
+            player.update(platforms);
+            enemies.forEach(e => e.update());
+
+            enemies.forEach(e => { if (checkAABB(player, e)) gameState = 'GAMEOVER'; });
+
+            for (let i = coins.length - 1; i >= 0; i--) {
+                if (checkAABB(player, coins[i])) {
+                    coins.splice(i, 1);
+                    totalScore += 50;
+                    scoreDisplay.innerText = totalScore;
+                }
+            }
+
+            // [핵심 해결 부분] 플레이어 객체 내부에서 기록된 touchingGoal 플래그를 확인합니다.
+            if (player.touchingGoal) {
+                startNextLevel();
+            }
+
+            cameraX = Math.max(0, player.x - canvas.width / 3);
+        }
+
+        function startNextLevel() {
+            if (isTransitioning) return; 
+            isTransitioning = true;
+            gameState = 'ROUND_CLEAR';
+            
+            setTimeout(() => {
+                currentLevel++;
+                initLevel(currentLevel);
+            }, 1000); 
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.save();
+            ctx.translate(-cameraX, 0);
+            
+            platforms.forEach(p => p.draw(ctx));
+            coins.forEach(c => c.draw(ctx));
+            enemies.forEach(e => e.draw(ctx));
+            player.draw(ctx);
+            
+            ctx.restore();
+
+            if (gameState === 'GAMEOVER') {
+                drawOverlay("GAME OVER", `Final Round: ${currentLevel} | Press F5`, "rgba(231, 76, 60, 0.8)");
+            } else if (gameState === 'ROUND_CLEAR') {
+                drawOverlay("ROUND CLEAR!", "Moving to Round " + (currentLevel + 1), "rgba(46, 204, 113, 0.8)");
+            }
+        }
+
+        function drawOverlay(txt, sub, color) {
+            ctx.fillStyle = color;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'white';
+            ctx.textAlign = 'center';
+            ctx.font = 'bold 50px sans-serif';
+            ctx.fillText(txt, canvas.width/2, canvas.height/2 - 10);
+            ctx.font = '20px sans-serif';
+            ctx.fillText(sub, canvas.width/2, canvas.height/2 + 40);
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        initLevel(currentLevel);
+        gameLoop();
+    </script>
+</body>
+</html>
